@@ -38,10 +38,10 @@ If grepai fails (not running, index unavailable, or errors), fall back to standa
 
 ` + "```bash" + `
 # ALWAYS use English queries for best results (--compact saves ~80% tokens)
-grepai search "user authentication flow" --json --compact
-grepai search "error handling middleware" --json --compact
-grepai search "database connection pool" --json --compact
-grepai search "API request validation" --json --compact
+grepai search "user authentication flow" --toon --compact
+grepai search "error handling middleware" --toon --compact
+grepai search "database connection pool" --toon --compact
+grepai search "API request validation" --toon --compact
 ` + "```" + `
 
 ### Query Tips
@@ -60,17 +60,17 @@ Use ` + "`grepai trace`" + ` to understand function relationships:
 
 #### Trace Commands
 
-**IMPORTANT: Always use ` + "`--json`" + ` flag for optimal AI agent integration.**
+**IMPORTANT: Always use ` + "`--toon`" + ` flag for optimal AI agent integration.**
 
 ` + "```bash" + `
 # Find all functions that call a symbol
-grepai trace callers "HandleRequest" --json
+grepai trace callers "HandleRequest" --toon
 
 # Find all functions called by a symbol
-grepai trace callees "ProcessOrder" --json
+grepai trace callees "ProcessOrder" --toon
 
 # Build complete call graph (callers + callees)
-grepai trace graph "ValidateToken" --depth 3 --json
+grepai trace graph "ValidateToken" --depth 3 --toon
 ` + "```" + `
 
 ### Workflow
@@ -104,8 +104,8 @@ Use this to find code by intent and meaning:
 ` + "```bash" + `
 # Use English queries for best results (--compact saves ~80% tokens)
 grepai search "authentication flow" --json --compact
-grepai search "error handling middleware" --json --compact
-grepai search "database connection management" --json --compact
+grepai search "error handling middleware" --toon --compact
+grepai search "database connection management" --toon --compact
 ` + "```" + `
 
 #### 2. Call Graph Tracing: ` + "`grepai trace`" + `
@@ -117,10 +117,10 @@ Use this to understand function relationships and code flow:
 grepai trace callers "HandleRequest" --json
 
 # Find all functions called by a symbol
-grepai trace callees "ProcessOrder" --json
+grepai trace callees "ProcessOrder" --toon
 
 # Build complete call graph
-grepai trace graph "ValidateToken" --depth 3 --json
+grepai trace graph "ValidateToken" --depth 3 --toon
 ` + "```" + `
 
 Use ` + "`grepai trace`" + ` when you need to:
@@ -135,6 +135,8 @@ Only fall back to Grep/Glob when:
 - You need exact text matching (variable names, imports)
 - grepai is not available or returns errors
 - You need file path patterns
+
+**Note:** Use ` + "`--toon`" + ` for ~50% fewer tokens than ` + "`--json`" + `.
 
 ### Workflow
 
