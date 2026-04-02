@@ -25,6 +25,7 @@ type Workspace struct {
 	Name     string         `yaml:"name"`
 	Store    StoreConfig    `yaml:"store"`
 	Embedder EmbedderConfig `yaml:"embedder"`
+	Search   SearchConfig   `yaml:"search"`
 	Projects []ProjectEntry `yaml:"projects"`
 }
 

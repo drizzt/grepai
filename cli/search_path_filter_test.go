@@ -108,12 +108,8 @@ func (m *MockStore) GetChunksForFile(ctx context.Context, filePath string) ([]st
 	return nil, nil
 }
 
-func (m *MockStore) GetAllChunks(ctx context.Context) ([]store.Chunk, error) {
-	chunks := make([]store.Chunk, 0, len(m.chunks))
-	for _, chunk := range m.chunks {
-		chunks = append(chunks, chunk)
-	}
-	return chunks, nil
+func (m *MockStore) TextSearch(ctx context.Context, query string, limit int, opts store.SearchOptions) ([]store.SearchResult, error) {
+	return nil, nil
 }
 
 // MockEmbedder is a test mock for Embedder

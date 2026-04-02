@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -123,6 +124,11 @@ func (s *QdrantStore) ensureCollection(ctx context.Context) error {
 		CollectionName: s.collectionName,
 		FieldName:      "file_path",
 		FieldType:      qdrant.PtrOf(qdrant.FieldType_FieldTypeKeyword),
+	})
+	_, _ = s.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
+		CollectionName: s.collectionName,
+		FieldName:      "content",
+		FieldType:      qdrant.PtrOf(qdrant.FieldType_FieldTypeText),
 	})
 
 	return nil
@@ -590,28 +596,89 @@ func (s *QdrantStore) GetChunksForFile(ctx context.Context, filePath string) ([]
 	return chunks, nil
 }
 
-func (s *QdrantStore) GetAllChunks(ctx context.Context) ([]Chunk, error) {
-	points, err := s.scrollAll(ctx, &qdrant.ScrollPoints{
+func (s *QdrantStore) TextSearch(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive, got: %d", limit)
+	}
+
+	// Tokenize query
+	fields := strings.Fields(strings.ToLower(query))
+	var words []string
+	for _, f := range fields {
+		if len(f) >= 2 {
+			words = append(words, f)
+		}
+	}
+
+	if len(words) == 0 {
+		return nil, nil
+	}
+
+	filter := &qdrant.Filter{
+		Must: []*qdrant.Condition{
+			qdrant.NewMatchText("content", query),
+		},
+	}
+
+	// Fetch a larger pool of results for local filtering and scoring
+	fetchLimit := limit * 2
+	if fetchLimit < 1000 {
+		fetchLimit = 1000
+	}
+
+	scrollResult, err := s.client.Scroll(ctx, &qdrant.ScrollPoints{
 		CollectionName: s.collectionName,
-		Limit:          qdrant.PtrOf(uint32(1000)),
+		Filter:         filter,
+		Limit:          qdrant.PtrOf(uint32(fetchLimit)),
 		WithPayload:    qdrant.NewWithPayloadInclude("file_path", "start_line", "end_line", "content", "hash", "updated_at"),
+		WithVectors:    qdrant.NewWithVectors(true),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get all chunks: %w", err)
+		return nil, fmt.Errorf("failed to text search: %w", err)
 	}
 
-	chunks := make([]Chunk, 0, len(points))
-	for _, point := range points {
+	var results []SearchResult
+	for _, point := range scrollResult {
 		chunk := s.parseChunkPayload(point.Payload)
-		if point.Vectors != nil && point.Vectors.GetVector() != nil {
-			if dense := point.Vectors.GetVector().GetDense(); dense != nil {
-				chunk.Vector = dense.GetData()
+
+		// Filter by path prefix if provided
+		if opts.PathPrefix != "" && !strings.HasPrefix(chunk.FilePath, opts.PathPrefix) {
+			continue
+		}
+
+		contentLower := strings.ToLower(chunk.Content)
+		matchCount := 0
+
+		for _, word := range words {
+			if strings.Contains(contentLower, word) {
+				matchCount++
 			}
 		}
-		chunks = append(chunks, *chunk)
+
+		if matchCount > 0 {
+			if point.Vectors != nil && point.Vectors.GetVector() != nil {
+				if dense := point.Vectors.GetVector().GetDense(); dense != nil {
+					chunk.Vector = dense.GetData()
+				}
+			}
+
+			score := float32(matchCount) / float32(len(words))
+			results = append(results, SearchResult{
+				Chunk: *chunk,
+				Score: score,
+			})
+		}
 	}
 
-	return chunks, nil
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
 }
 
 // LookupByContentHash searches Qdrant for a point matching the content hash.

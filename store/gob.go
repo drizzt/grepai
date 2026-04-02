@@ -302,15 +302,58 @@ func (s *GOBStore) GetChunksForFile(ctx context.Context, filePath string) ([]Chu
 	return chunks, nil
 }
 
-func (s *GOBStore) GetAllChunks(ctx context.Context) ([]Chunk, error) {
+func (s *GOBStore) TextSearch(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	chunks := make([]Chunk, 0, len(s.chunks))
-	for _, chunk := range s.chunks {
-		chunks = append(chunks, chunk)
+	// Tokenize query
+	fields := strings.Fields(strings.ToLower(query))
+	var words []string
+	for _, f := range fields {
+		if len(f) >= 2 {
+			words = append(words, f)
+		}
 	}
-	return chunks, nil
+	
+	if len(words) == 0 {
+		return nil, nil
+	}
+
+	var results []SearchResult
+
+	for _, chunk := range s.chunks {
+		// Filter by path prefix if provided
+		if opts.PathPrefix != "" && !strings.HasPrefix(chunk.FilePath, opts.PathPrefix) {
+			continue
+		}
+
+		contentLower := strings.ToLower(chunk.Content)
+		matchCount := 0
+
+		for _, word := range words {
+			if strings.Contains(contentLower, word) {
+				matchCount++
+			}
+		}
+
+		if matchCount > 0 {
+			score := float32(matchCount) / float32(len(words))
+			results = append(results, SearchResult{
+				Chunk: chunk,
+				Score: score,
+			})
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+
+	if limit > 0 && len(results) > limit {
+		results = results[:limit]
+	}
+
+	return results, nil
 }
 
 // LookupByContentHash searches in-memory chunks for a matching content hash.

@@ -67,13 +67,11 @@ func (s *Searcher) hybridSearch(ctx context.Context, query string, queryVector [
 		return nil, err
 	}
 
-	// Text search (get all chunks first)
-	allChunks, err := s.store.GetAllChunks(ctx)
+	// Text search
+	textResults, err := s.store.TextSearch(ctx, query, limit, store.SearchOptions{PathPrefix: pathPrefix})
 	if err != nil {
 		return nil, err
 	}
-
-	textResults := TextSearch(ctx, allChunks, query, limit, pathPrefix)
 
 	// Combine with RRF
 	k := s.hybridCfg.K

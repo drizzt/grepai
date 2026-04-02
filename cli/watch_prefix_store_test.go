@@ -25,7 +25,7 @@ type mockVectorStore struct {
 	listFilesResult       []store.FileStats
 	getChunksForFilePath  string
 	getChunksForFileItems []store.Chunk
-	getAllChunksItems     []store.Chunk
+	textSearchItems       []store.SearchResult
 }
 
 func (m *mockVectorStore) SaveChunks(_ context.Context, chunks []store.Chunk) error {
@@ -89,8 +89,8 @@ func (m *mockVectorStore) GetChunksForFile(_ context.Context, filePath string) (
 	return m.getChunksForFileItems, nil
 }
 
-func (m *mockVectorStore) GetAllChunks(_ context.Context) ([]store.Chunk, error) {
-	return m.getAllChunksItems, nil
+func (m *mockVectorStore) TextSearch(ctx context.Context, query string, limit int, opts store.SearchOptions) ([]store.SearchResult, error) {
+	return m.textSearchItems, nil
 }
 
 func TestDescribeRetryReason(t *testing.T) {
@@ -222,7 +222,7 @@ func TestProjectPrefixStore_PassThroughAndGetChunks(t *testing.T) {
 		getStatsResult:        &store.IndexStats{TotalFiles: 2},
 		listFilesResult:       []store.FileStats{{Path: "p"}},
 		getChunksForFileItems: []store.Chunk{{ID: "c1"}},
-		getAllChunksItems:     []store.Chunk{{ID: "c2"}},
+		textSearchItems:       []store.SearchResult{{Chunk: store.Chunk{ID: "c2"}}},
 	}
 	wrapped := &projectPrefixStore{
 		store:         mock,
@@ -258,8 +258,8 @@ func TestProjectPrefixStore_PassThroughAndGetChunks(t *testing.T) {
 	if _, err := wrapped.ListFilesWithStats(ctx); err != nil {
 		t.Fatalf("ListFilesWithStats failed: %v", err)
 	}
-	if _, err := wrapped.GetAllChunks(ctx); err != nil {
-		t.Fatalf("GetAllChunks failed: %v", err)
+	if _, err := wrapped.TextSearch(ctx, "query", 10, store.SearchOptions{}); err != nil {
+		t.Fatalf("TextSearch failed: %v", err)
 	}
 
 	abs := filepath.Join(projectRoot, "pkg", "x.go")

@@ -120,12 +120,8 @@ func (m *MockMCPStore) GetChunksForFile(ctx context.Context, filePath string) ([
 	return nil, nil
 }
 
-func (m *MockMCPStore) GetAllChunks(ctx context.Context) ([]storelib.Chunk, error) {
-	chunks := make([]storelib.Chunk, 0, len(m.chunks))
-	for _, chunk := range m.chunks {
-		chunks = append(chunks, chunk)
-	}
-	return chunks, nil
+func (m *MockMCPStore) TextSearch(ctx context.Context, query string, limit int, opts storelib.SearchOptions) ([]storelib.SearchResult, error) {
+	return nil, nil
 }
 
 // MockMCPEmbedder is a mock embedder for MCP tests

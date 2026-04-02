@@ -93,8 +93,8 @@ type VectorStore interface {
 	// GetChunksForFile returns all chunks for a specific file
 	GetChunksForFile(ctx context.Context, filePath string) ([]Chunk, error)
 
-	// GetAllChunks returns all chunks in the store (used for text search)
-	GetAllChunks(ctx context.Context) ([]Chunk, error)
+	// TextSearch finds chunks matching the keyword query
+	TextSearch(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error)
 }
 
 // EmbeddingCache is an optional interface that VectorStore implementations can

@@ -432,15 +432,15 @@ func TestGOBStore_FileLocking(t *testing.T) {
 	if err := s2.Load(ctx); err != nil {
 		t.Fatalf("Load failed: %v", err)
 	}
-
-	chunks, err := s2.GetAllChunks(ctx)
+	results, err := s2.TextSearch(ctx, "hello", 10, SearchOptions{})
 	if err != nil {
-		t.Fatalf("GetAllChunks failed: %v", err)
+		t.Fatalf("TextSearch failed: %v", err)
 	}
-	if len(chunks) != 1 {
-		t.Fatalf("Expected 1 chunk, got %d", len(chunks))
+
+	if len(results) != 1 {
+		t.Errorf("Expected 1 result, got %d", len(results))
 	}
-	if chunks[0].ID != "c1" {
-		t.Errorf("Expected chunk ID c1, got %s", chunks[0].ID)
+	if len(results) > 0 && results[0].Chunk.ID != "c1" {
+		t.Errorf("Expected chunk ID c1, got %s", results[0].Chunk.ID)
 	}
 }

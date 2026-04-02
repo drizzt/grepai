@@ -24,6 +24,7 @@ var (
 	searchJSON      bool
 	searchTOON      bool
 	searchCompact   bool
+	searchHybrid    bool
 	searchWorkspace string
 	searchProjects  []string
 	searchPath      string
@@ -68,6 +69,7 @@ func init() {
 	searchCmd.Flags().BoolVarP(&searchJSON, "json", "j", false, "Output results in JSON format (for AI agents)")
 	searchCmd.Flags().BoolVarP(&searchTOON, "toon", "t", false, "Output results in TOON format (token-efficient for AI agents)")
 	searchCmd.Flags().BoolVarP(&searchCompact, "compact", "c", false, "Output minimal format without content (requires --json or --toon)")
+	searchCmd.Flags().BoolVar(&searchHybrid, "hybrid", false, "Force enable hybrid search")
 	searchCmd.Flags().StringVar(&searchWorkspace, "workspace", "", "Workspace name for cross-project search")
 	searchCmd.Flags().StringArrayVar(&searchProjects, "project", nil, "Project name(s) to search (requires --workspace, can be repeated)")
 	searchCmd.Flags().StringVar(&searchPath, "path", "", "Path prefix to filter search results")
@@ -262,7 +264,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	defer st.Close()
 
 	// Create searcher with boost config
-	searcher := search.NewSearcher(st, emb, cfg.Search)
+	searchCfg := cfg.Search
+	if searchHybrid {
+		searchCfg.Hybrid.Enabled = true
+	}
+	searcher := search.NewSearcher(st, emb, searchCfg)
 
 	normalizedPath, err := search.NormalizeProjectPathPrefix(searchPath, projectRoot)
 	if err != nil {
@@ -528,7 +534,11 @@ func SearchJSON(projectRoot string, query string, limit int) ([]store.SearchResu
 	defer st.Close()
 
 	// Create searcher with boost config
-	searcher := search.NewSearcher(st, emb, cfg.Search)
+	searchCfg := cfg.Search
+	if searchHybrid {
+		searchCfg.Hybrid.Enabled = true
+	}
+	searcher := search.NewSearcher(st, emb, searchCfg)
 
 	return searcher.Search(ctx, query, limit, "")
 }
@@ -595,10 +605,16 @@ func runWorkspaceSearch(ctx context.Context, query string, projects []string, pa
 	}
 	defer st.Close()
 
-	// Create searcher with default search config
-	searchCfg := config.SearchConfig{
-		Hybrid: config.HybridConfig{Enabled: false, K: 60},
-		Boost:  config.DefaultConfig().Search.Boost,
+	// Create searcher with workspace search config
+	searchCfg := ws.Search
+	if searchHybrid {
+		searchCfg.Hybrid.Enabled = true
+	}
+	if searchCfg.Hybrid.K <= 0 {
+		searchCfg.Hybrid.K = 60
+	}
+	if len(searchCfg.Boost.Penalties) == 0 && len(searchCfg.Boost.Bonuses) == 0 {
+		searchCfg.Boost = config.DefaultConfig().Search.Boost
 	}
 	searcher := search.NewSearcher(st, emb, searchCfg)
 

@@ -2969,6 +2969,13 @@ func (p *projectPrefixStore) GetChunksForFile(ctx context.Context, filePath stri
 	return p.store.GetChunksForFile(ctx, filePath)
 }
 
-func (p *projectPrefixStore) GetAllChunks(ctx context.Context) ([]store.Chunk, error) {
-	return p.store.GetAllChunks(ctx)
+func (p *projectPrefixStore) TextSearch(ctx context.Context, query string, limit int, opts store.SearchOptions) ([]store.SearchResult, error) {
+	// Add our project path prefix to any existing prefix
+	newPrefix := p.getPrefix()
+	if opts.PathPrefix != "" {
+		newPrefix = newPrefix + "/" + strings.TrimPrefix(opts.PathPrefix, "/")
+	}
+	
+	opts.PathPrefix = newPrefix
+	return p.store.TextSearch(ctx, query, limit, opts)
 }

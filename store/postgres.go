@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,6 +63,7 @@ func (s *PostgresStore) ensureSchema(ctx context.Context) error {
 		)`,
 		`ALTER TABLE chunks ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON chunks(content_hash) WHERE content_hash != ''`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_content_tsvector ON chunks USING GIN(to_tsvector('english', content))`,
 		buildEnsureVectorSQL(s.dimensions),
 		// Migrate chunks primary key from (id) to (project_id, id) so that
 		// worktrees sharing the same database get their own chunk rows instead
@@ -350,27 +352,62 @@ func (s *PostgresStore) GetChunksForFile(ctx context.Context, filePath string) (
 	return chunks, rows.Err()
 }
 
-func (s *PostgresStore) GetAllChunks(ctx context.Context) ([]Chunk, error) {
-	rows, err := s.pool.Query(ctx,
-		`SELECT id, file_path, start_line, end_line, content, hash, updated_at
-		FROM chunks WHERE project_id = $1`,
-		s.projectID,
-	)
+func (s *PostgresStore) TextSearch(ctx context.Context, query string, limit int, opts SearchOptions) ([]SearchResult, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("limit must be positive, got: %d", limit)
+	}
+
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+
+	// Prepare base query
+	sqlQuery := `SELECT id, file_path, start_line, end_line, content, vector, hash, updated_at,
+		ts_rank(to_tsvector('english', content), websearch_to_tsquery('english', $1)) as score
+	FROM chunks
+	WHERE project_id = $2 
+	  AND to_tsvector('english', content) @@ websearch_to_tsquery('english', $1)`
+
+	args := []interface{}{query, s.projectID}
+	nextParam := 3
+
+	// Add path prefix filter if provided
+	if opts.PathPrefix != "" {
+		sqlQuery += ` AND file_path LIKE $` + fmt.Sprintf("%d", nextParam)
+		args = append(args, opts.PathPrefix+"%")
+		nextParam++
+	}
+
+	sqlQuery += ` ORDER BY score DESC LIMIT $` + fmt.Sprintf("%d", nextParam)
+	args = append(args, limit)
+
+	rows, err := s.pool.Query(ctx, sqlQuery, args...)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get all chunks: %w", err)
+		return nil, fmt.Errorf("failed to text search: %w", err)
 	}
 	defer rows.Close()
 
-	var chunks []Chunk
+	var results []SearchResult
 	for rows.Next() {
-		var c Chunk
-		if err := rows.Scan(&c.ID, &c.FilePath, &c.StartLine, &c.EndLine, &c.Content, &c.Hash, &c.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("failed to scan chunk: %w", err)
+		var chunk Chunk
+		var vec pgvector.Vector
+		var score float32
+
+		if err := rows.Scan(
+			&chunk.ID, &chunk.FilePath, &chunk.StartLine, &chunk.EndLine,
+			&chunk.Content, &vec, &chunk.Hash, &chunk.UpdatedAt, &score,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
-		chunks = append(chunks, c)
+
+		chunk.Vector = vec.Slice()
+		results = append(results, SearchResult{
+			Chunk: chunk,
+			Score: score,
+		})
 	}
 
-	return chunks, rows.Err()
+	return results, rows.Err()
 }
 
 // LookupByContentHash queries the chunks table for a matching content hash and returns the vector.
