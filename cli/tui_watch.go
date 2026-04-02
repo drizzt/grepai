@@ -1223,3 +1223,224 @@ func runWatchUIWorker(ctx context.Context, p *tea.Program) (err error) {
 		}),
 	)
 }
+
+func runWorkspaceWatchForegroundUI(ws *config.Workspace) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+
+	model := newWatchUIModel(cancel)
+	p := tea.NewProgram(model, tea.WithAltScreen())
+
+	workerErrCh := make(chan error, 1)
+	go func() {
+		workerErrCh <- runWorkspaceWatchUIWorker(ctx, p, ws)
+	}()
+
+	_, runErr := p.Run()
+	cancel()
+	workerErr := <-workerErrCh
+
+	if runErr != nil {
+		return runErr
+	}
+	if workerErr != nil && !errors.Is(workerErr, context.Canceled) {
+		return workerErr
+	}
+	return nil
+}
+
+func runWorkspaceWatchUIWorker(ctx context.Context, p *tea.Program, ws *config.Workspace) (err error) {
+	defer func() {
+		if err != nil {
+			p.Send(watchUIErrorMsg{err: err})
+		}
+		p.Send(watchUIDoneMsg{})
+	}()
+
+	p.Send(watchUIPhaseMsg{current: 0})
+
+	// Validate project paths.
+	for _, proj := range ws.Projects {
+		if _, statErr := os.Stat(proj.Path); os.IsNotExist(statErr) {
+			return fmt.Errorf("project path does not exist: %s (%s)", proj.Name, proj.Path)
+		}
+	}
+
+	// Set up log source resolver with all project paths.
+	projectPaths := make([]string, 0, len(ws.Projects))
+	for _, proj := range ws.Projects {
+		projectPaths = append(projectPaths, proj.Path)
+	}
+	registerLogSource, resolveLogSource := newWatchUILogSourceResolver(projectPaths...)
+	_ = registerLogSource // resolver is pre-seeded; registration is a no-op for static workspace
+
+	restoreLogs := captureWatchUILogs(p, resolveLogSource)
+	defer restoreLogs()
+
+	rpgState := "disabled"
+	for _, proj := range ws.Projects {
+		if cfg, cfgErr := config.Load(proj.Path); cfgErr == nil && cfg.RPG.Enabled {
+			rpgState = "enabled"
+			break
+		}
+	}
+
+	mainRoot := ws.Projects[0].Path
+	p.Send(watchUIContextMsg{
+		projectRoot: mainRoot,
+		provider:    ws.Embedder.Provider,
+		model:       ws.Embedder.Model,
+		backend:     ws.Store.Backend,
+		rpg:         rpgState,
+	})
+	sendWatchUILedger(p, mainRoot, "info", fmt.Sprintf("Starting workspace watcher: %s (%d projects)", ws.Name, len(ws.Projects)))
+	p.Send(watchUIPhaseMsg{current: 1})
+
+	watchCtx, watchCancel := context.WithCancel(ctx)
+	defer watchCancel()
+
+	// Initialize shared embedder.
+	embCfg := &config.Config{Embedder: ws.Embedder}
+	emb, err := initializeEmbedder(watchCtx, embCfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize embedder: %w", err)
+	}
+	defer emb.Close()
+
+	// Initialize shared store.
+	sharedStore, err := initializeWorkspaceStore(watchCtx, ws)
+	if err != nil {
+		return fmt.Errorf("failed to initialize store: %w", err)
+	}
+	defer sharedStore.Close()
+
+	// Persist shared store periodically.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-watchCtx.Done():
+				return
+			case <-ticker.C:
+				if persistErr := sharedStore.Persist(watchCtx); persistErr != nil {
+					log.Printf("Warning: failed to persist workspace store: %v", persistErr)
+				}
+			}
+		}
+	}()
+
+	// Build linked worktrees list (all projects except the first, which is mainRoot).
+	var linked []string
+	for _, proj := range ws.Projects[1:] {
+		linked = append(linked, proj.Path)
+	}
+
+	totalEvents := 0
+	var lastSuccess time.Time
+	var healthMu sync.Mutex
+	emitHealth := func() {
+		healthMu.Lock()
+		defer healthMu.Unlock()
+		p.Send(watchUIHealthMsg{
+			totalEvents: totalEvents,
+			lastSuccess: lastSuccess,
+		})
+	}
+
+	return runDynamicWatchSupervisor(
+		watchCtx,
+		mainRoot,
+		emb,
+		withWatchSupervisorBackgroundChild(false),
+		withWatchSupervisorSessionRunner(newWorkspaceSessionRunner(ws, sharedStore)),
+		withWatchSupervisorDiscoverWorktrees(func(_ string) []string { return nil }),
+		withWatchSupervisorInitialLinkedWorktrees(linked),
+		withWatchSupervisorScopeObserver(func(totalProjects int) {
+			p.Send(watchUIScopeMsg{totalProjects: totalProjects})
+		}),
+		withWatchSupervisorInitialReadyObserver(func(totalProjects int) {
+			sendWatchUILedger(p, mainRoot, "ok", fmt.Sprintf("Watching %d project(s) for changes", totalProjects))
+			p.Send(watchUIPhaseMsg{current: 4})
+		}),
+		withWatchSupervisorLifecycleObserver(func(root, state, note string) {
+			p.Send(watchUISessionMsg{
+				projectRoot: root,
+				state:       state,
+				note:        note,
+			})
+			switch state {
+			case "starting":
+				sendWatchUILedger(p, root, "info", "Session starting")
+			case "running":
+				p.Send(watchUIReadyMsg{projectRoot: root})
+				sendWatchUILedger(p, root, "ok", "Session running")
+			case "retrying":
+				sendWatchUILedger(p, root, "warn", "Retry scheduled: "+note)
+			case "error":
+				sendWatchUILedger(p, root, "error", note)
+			case "removed":
+				sendWatchUILedger(p, root, "warn", "Session removed")
+			case "stopped":
+				sendWatchUILedger(p, root, "warn", "Session stopped")
+			}
+		}),
+		withWatchSupervisorEventObserver(func(sourceRoot string, event watcher.FileEvent) {
+			sendWatchUILedger(p, sourceRoot, "info", fmt.Sprintf("[%s] %s", event.Type.String(), event.Path))
+			healthMu.Lock()
+			totalEvents++
+			lastSuccess = time.Now()
+			healthMu.Unlock()
+			emitHealth()
+		}),
+		withWatchSupervisorScanObserver(func(current, total int, file string) {
+			p.Send(watchUIScanMsg{
+				current: current,
+				total:   total,
+				file:    file,
+			})
+			if total > 0 && current < total {
+				p.Send(watchUIPhaseMsg{current: 1})
+			}
+		}),
+		withWatchSupervisorEmbedObserver(func(info indexer.BatchProgressInfo) {
+			p.Send(watchUIEmbedMsg{
+				completed: info.CompletedChunks,
+				total:     info.TotalChunks,
+			})
+			if info.TotalChunks > 0 && info.CompletedChunks < info.TotalChunks {
+				p.Send(watchUIPhaseMsg{current: 2})
+			}
+		}),
+		withWatchSupervisorRPGObserver(func(step string, current, total int) {
+			p.Send(watchUIRPGMsg{
+				step:    step,
+				current: current,
+				total:   total,
+			})
+		}),
+		withWatchSupervisorActivityObserver(func(state, file string) {
+			p.Send(watchUIActivityMsg{
+				state: state,
+				file:  file,
+			})
+		}),
+		withWatchSupervisorStatsObserver(func(projectRoot string, delta watchStatsDelta) {
+			p.Send(watchUIStatsMsg{
+				projectRoot: projectRoot,
+				delta:       delta,
+			})
+		}),
+	)
+}

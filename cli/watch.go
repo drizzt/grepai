@@ -2259,6 +2259,9 @@ func runWorkspaceWatch(logDir string) error {
 	}
 
 	// Run in foreground mode
+	if !watchNoUI && watchIsInteractiveTerminal() {
+		return runWorkspaceWatchForegroundUI(ws)
+	}
 	return runWorkspaceWatchForeground(logDir, ws)
 }
 
@@ -2617,7 +2620,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := runWorkspaceProjectInitialScan(ctx, runtime, isBackgroundChild); err != nil {
+	if err := runWorkspaceProjectInitialScan(ctx, runtime, isBackgroundChild, nil, nil); err != nil {
 		_ = runtime.symbolStore.Close()
 		return nil, nil, err
 	}
@@ -2688,6 +2691,166 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 	runtime.manager = manager
 	runtime.watcher = w
 	return runtime, w, nil
+}
+
+// newWorkspaceSessionRunner returns a watchSupervisorSessionRunner that uses a shared
+// embedder and store (with per-project projectPrefixStore wrappers) from the workspace config.
+// It does NOT close the shared vectorStore on return — that is the caller's responsibility.
+func newWorkspaceSessionRunner(ws *config.Workspace, sharedStore store.VectorStore) watchSupervisorSessionRunner {
+	return func(
+		ctx context.Context,
+		projectRoot string,
+		emb embedder.Embedder,
+		isBackgroundChild bool,
+		onReady func(),
+		onEvent watchSessionEventObserver,
+		onScan func(current, total int, file string),
+		onEmbed func(info indexer.BatchProgressInfo),
+		onRPG func(step string, current, total int),
+		onActivity watchActivityObserver,
+		onStats watchStatsObserver,
+	) error {
+		// Find the matching project entry by canonical path.
+		canonical := canonicalPath(projectRoot)
+		var project config.ProjectEntry
+		found := false
+		for _, p := range ws.Projects {
+			if canonicalPath(p.Path) == canonical {
+				project = p
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("workspace session runner: no project found for path %s", projectRoot)
+		}
+
+		runtime, err := newWorkspaceProjectRuntime(ctx, ws, project, emb, sharedStore)
+		if err != nil {
+			return err
+		}
+		defer runtime.symbolStore.Close()
+
+		if err := runWorkspaceProjectInitialScan(ctx, runtime, isBackgroundChild, onScan, onEmbed); err != nil {
+			return err
+		}
+
+		// Set up RPG if enabled.
+		if runtime.cfg.RPG.Enabled {
+			rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(project.Path))
+			if err := rpgStore.Load(ctx); err != nil {
+				log.Printf("Warning: failed to load RPG index for %s: %v", project.Path, err)
+			}
+			defer func() {
+				if err := rpgStore.Persist(ctx); err != nil {
+					log.Printf("Warning: failed to persist RPG graph on shutdown for %s: %v", project.Name, err)
+				}
+				_ = rpgStore.Close()
+			}()
+
+			var featureExtractor rpg.FeatureExtractor
+			switch runtime.cfg.RPG.FeatureMode {
+			case "llm", "hybrid":
+				if runtime.cfg.RPG.LLMEndpoint == "" || runtime.cfg.RPG.LLMModel == "" {
+					log.Printf("Warning: RPG feature_mode=%q but llm_endpoint or llm_model is empty for %s, falling back to local extractor", runtime.cfg.RPG.FeatureMode, project.Path)
+					featureExtractor = rpg.NewLocalExtractor()
+				} else {
+					featureExtractor = rpg.NewLLMExtractor(rpg.LLMExtractorConfig{
+						Provider: runtime.cfg.RPG.LLMProvider,
+						Model:    runtime.cfg.RPG.LLMModel,
+						Endpoint: runtime.cfg.RPG.LLMEndpoint,
+						APIKey:   runtime.cfg.RPG.LLMAPIKey,
+						Timeout:  time.Duration(runtime.cfg.RPG.LLMTimeoutMs) * time.Millisecond,
+					})
+				}
+			default:
+				featureExtractor = rpg.NewLocalExtractor()
+			}
+
+			rpgEncoder := rpg.NewRPGEncoder(rpgStore, featureExtractor, project.Path, rpg.RPGEncoderConfig{
+				DriftThreshold:       runtime.cfg.RPG.DriftThreshold,
+				MaxTraversalDepth:    runtime.cfg.RPG.MaxTraversalDepth,
+				FeatureGroupStrategy: runtime.cfg.RPG.FeatureGroupStrategy,
+			})
+
+			var rpgBuildObserver func(step string, current, total int)
+			if onRPG != nil {
+				rpgBuildObserver = onRPG
+			}
+			if err := rpgEncoder.BuildFull(ctx, runtime.symbolStore, runtime.vectorStore, rpgBuildObserver); err != nil {
+				log.Printf("Warning: failed to build RPG graph for %s: %v", project.Path, err)
+			}
+			if err := rpgStore.Persist(ctx); err != nil {
+				log.Printf("Warning: failed to persist RPG graph for %s: %v", project.Path, err)
+			}
+
+			manager := newRPGRealtimeManager(runtime.cfg.Watch.RPGMaxDirtyFilesPerBatch)
+			startRPGRealtimeWorkers(ctx, fmt.Sprintf("workspace:%s/%s", ws.Name, project.Name), runtime.symbolStore, rpgEncoder, rpgStore, runtime.cfg.Watch, manager)
+			runtime.rpgEncoder = rpgEncoder
+			runtime.rpgStore = rpgStore
+			runtime.manager = manager
+		}
+
+		w, err := watcher.NewWatcher(project.Path, runtime.ignoreMatcher, runtime.cfg.Watch.DebounceMs)
+		if err != nil {
+			return fmt.Errorf("failed to create watcher for %s: %w", project.Name, err)
+		}
+		if err := w.Start(ctx); err != nil {
+			w.Close()
+			return fmt.Errorf("failed to start watcher for %s: %w", project.Name, err)
+		}
+		defer w.Close()
+
+		if onReady != nil {
+			onReady()
+		}
+
+		persistTicker := time.NewTicker(30 * time.Second)
+		defer persistTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				if err := runtime.symbolStore.Persist(ctx); err != nil {
+					log.Printf("Warning: failed to persist symbol index for %s: %v", project.Name, err)
+				}
+				return nil
+			case <-persistTicker.C:
+				if err := runtime.symbolStore.Persist(ctx); err != nil {
+					log.Printf("Warning: failed to persist symbol index for %s: %v", project.Name, err)
+				}
+				if runtime.rpgStore != nil {
+					if err := runtime.rpgStore.Persist(ctx); err != nil {
+						log.Printf("Warning: failed to persist RPG graph for %s: %v", project.Name, err)
+					}
+				}
+			case event, ok := <-w.Events():
+				if !ok {
+					return nil
+				}
+				if onEvent != nil {
+					onEvent(project.Path, event)
+				}
+				handleFileEvent(
+					ctx,
+					runtime.idx,
+					runtime.scanner,
+					runtime.extractor,
+					runtime.symbolStore,
+					runtime.rpgEncoder,
+					runtime.vectorStore,
+					runtime.tracedLanguages,
+					project.Path,
+					runtime.cfg,
+					&runtime.lastConfigWrite,
+					runtime.manager,
+					event,
+					onActivity,
+					onStats,
+				)
+			}
+		}
+	}
 }
 
 func initializeWorkspaceStore(ctx context.Context, ws *config.Workspace) (store.VectorStore, error) {

@@ -11,6 +11,7 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/daemon"
 	"github.com/yoanbernabeu/grepai/indexer"
+	"github.com/yoanbernabeu/grepai/store"
 )
 
 func withWatchGlobals(t *testing.T, workspace string, status, stop, background bool) {
@@ -258,6 +259,56 @@ func TestIsTracedLanguage(t *testing.T) {
 	}
 	if isTracedLanguage(".js", langs) {
 		t.Fatal("isTracedLanguage(.js) = true, want false")
+	}
+}
+
+func TestNewWorkspaceSessionRunnerUnknownPath(t *testing.T) {
+	ws := &config.Workspace{
+		Name: "ws",
+		Projects: []config.ProjectEntry{
+			{Name: "p1", Path: t.TempDir()},
+		},
+	}
+	sharedStore := store.NewGOBStore(filepath.Join(t.TempDir(), "index.gob"))
+	runner := newWorkspaceSessionRunner(ws, sharedStore)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancelled immediately so the runner exits fast
+
+	err := runner(ctx, t.TempDir(), &countingEmbedder{}, false, nil, nil, nil, nil, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected error for unknown project path")
+	}
+	if !strings.Contains(err.Error(), "no project found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestNewWorkspaceSessionRunnerFoundProject(t *testing.T) {
+	projectPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectPath, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatalf("failed to write file: %v", err)
+	}
+
+	ws := &config.Workspace{
+		Name: "ws",
+		Projects: []config.ProjectEntry{
+			{Name: "p1", Path: projectPath},
+		},
+	}
+	sharedStore := store.NewGOBStore(filepath.Join(t.TempDir(), "index.gob"))
+	runner := newWorkspaceSessionRunner(ws, sharedStore)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	readyCh := make(chan struct{})
+	go func() {
+		<-readyCh
+		cancel()
+	}()
+
+	err := runner(ctx, projectPath, &countingEmbedder{}, false, func() { close(readyCh) }, nil, nil, nil, nil, nil, nil)
+	if err != nil && !strings.Contains(err.Error(), "context") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

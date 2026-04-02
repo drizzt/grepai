@@ -62,7 +62,7 @@ func newWorkspaceProjectRuntime(ctx context.Context, ws *config.Workspace, proje
 	}, nil
 }
 
-func runWorkspaceProjectInitialScan(ctx context.Context, runtime *workspaceProjectRuntime, isBackgroundChild bool) error {
+func runWorkspaceProjectInitialScan(ctx context.Context, runtime *workspaceProjectRuntime, isBackgroundChild bool, onScan func(current, total int, file string), onEmbed func(info indexer.BatchProgressInfo)) error {
 	stats, err := runInitialScan(
 		ctx,
 		runtime.idx,
@@ -72,8 +72,8 @@ func runWorkspaceProjectInitialScan(ctx context.Context, runtime *workspaceProje
 		runtime.tracedLanguages,
 		runtime.cfg.Watch.LastIndexTime,
 		isBackgroundChild,
-		nil,
-		nil,
+		onScan,
+		onEmbed,
 	)
 	if err != nil {
 		return err
@@ -93,5 +93,5 @@ func runWorkspaceProjectStartupRefresh(ctx context.Context, ws *config.Workspace
 		return err
 	}
 	defer runtime.symbolStore.Close()
-	return runWorkspaceProjectInitialScan(ctx, runtime, isBackgroundChild)
+	return runWorkspaceProjectInitialScan(ctx, runtime, isBackgroundChild, nil, nil)
 }
